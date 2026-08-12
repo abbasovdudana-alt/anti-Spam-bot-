@@ -17,10 +17,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Linklərin və Mesajların idarəsi\n"
         "• Qadağan olunmuş sözlərin bloklanması\n"
         "• Sürətli mesajlara avtomatik Mute\n"
-        "• `/warn` (3 xəbərdarlıqda avto-ban)\n"
+        "• `/warn` və `/unwarn` (Səbəbli xəbərdarlıq sistemi)\n"
         "• `/mute`, `/unmute`, `/ban`, `/unban` komutları\n\n"
         "🛠 **Qurucu / Owner:** @sasaadminn\n"
-        "🚀 **Versiya:** PRO v4.9"
+        "🚀 **Versiya:** PRO v5.0"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -39,12 +39,10 @@ def parse_time(time_str):
     elif unit == 'd': return value * 86400
     return 60
 
-# Admin yoxlama funksiyası
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.message.from_user
     chat = update.effective_chat
     
-    # Qrup sahibidirsə həmişə icazəlidir
     member = await chat.get_member(user.id)
     if member.status in ['creator', 'administrator']:
         return True
@@ -92,7 +90,7 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await message.reply_text(success_msg, parse_mode="Markdown")
     except Exception as e:
-        await message.reply_text(f"❌ Xəta baş verdi (Botun admin hüququ çatışmaya bilər): {e}")
+        await message.reply_text(f"❌ Xəta baş verdi: {e}")
 
 # UNMUTE KOMUTU
 async def manual_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -114,7 +112,9 @@ async def manual_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 can_send_messages=True,
                 can_send_media_messages=True,
                 can_send_other_messages=True,
-                can_add_web_page_previews=True
+                can_add_web_page_previews=True,
+                can_send_polls=True,
+                can_invite_users=True
             )
         )
         unmute_msg = (
@@ -184,13 +184,13 @@ async def manual_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await message.reply_text(f"❌ Xəta baş verdi (ID-ni düzgün yazdığınızdan əmin olun): {e}")
 
-# WARN KOMUTU
+# WARN KOMUTU (Səbəbli)
 async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context): return
     message = update.message
     
     if not message.reply_to_message:
-        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlıq vermək istədiyiniz şəxsin **mesajına cavab verərək** `/warn` yazın!", parse_mode="Markdown")
+        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlıq vermək istədiyiniz şəxsin **mesajına cavab verərək** `/warn <səbəb>` yazın!", parse_mode="Markdown")
         return
 
     chat_id = message.chat.id
@@ -205,14 +205,19 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    reason = " ".join(context.args) if context.args else "Göstərilməyib"
     user_key = f"{chat_id}_{target_user.id}"
-    warnings_db[user_key] = warnings_db.get(user_key, 0) + 1
-    current_warns = warnings_db[user_key]
+    
+    if user_key not in warnings_db:
+        warnings_db[user_key] = []
+        
+    warnings_db[user_key].append(reason)
+    current_warns = len(warnings_db[user_key])
 
     if current_warns >= 3:
         try:
             await context.bot.ban_chat_member(chat_id, target_user.id)
-            warnings_db[user_key] = 0
+            warnings_db[user_key] = []
             ban_msg = (
                 "╭━ 🚨 **LİMİT AŞILDI (3/3 BAN)** 🚨 ━╮\n\n"
                 f"👤 **İstifadəçi:** {target_mention}\n"
@@ -227,10 +232,38 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "╭━ ⚠️ **XƏBƏRDARLIQ VERİLDİ** ⚠️ ━╮\n\n"
             f"👤 **İstifadəçi:** {target_mention}\n"
             f"📊 **Xəbərdarlıq sayı:** `{current_warns} / 3`\n"
-            "📜 *Qeyd: 3 xəbərdarlıq avtomatik ban ilə nəticələnəcək!*\n\n"
+            f"📜 **Səbəb:** `{reason}`\n\n"
             "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         await message.reply_text(warn_msg, parse_mode="Markdown")
+
+# UNWARN KOMUTU (Xəbərdarlığı silmək)
+async def manual_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
+    message = update.message
+    
+    if not message.reply_to_message:
+        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlığını silmək istədiyiniz şəxsin **mesajına cavab verərək** `/unwarn` yazın!", parse_mode="Markdown")
+        return
+
+    chat_id = message.chat.id
+    target_user = message.reply_to_message.from_user
+    target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
+    
+    user_key = f"{chat_id}_{target_user.id}"
+    
+    if user_key in warnings_db and len(warnings_db[user_key]) > 0:
+        warnings_db[user_key].pop() # Sonuncu warn-ı silir
+        current_warns = len(warnings_db[user_key])
+        unwarn_msg = (
+            "╭━ ✅ **XƏBƏRDARLIQ SİLİNDİ** ✅ ━╮\n\n"
+            f"👤 **İstifadəçi:** {target_mention}\n"
+            f"📊 **Qalan xəbərdarlıq:** `{current_warns} / 3`\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+        )
+        await message.reply_text(unwarn_msg, parse_mode="Markdown")
+    else:
+        await message.reply_text("ℹ️ Bu istifadəçinin aktiv xəbərdarlığı yoxdur.", parse_mode="Markdown")
 
 # ANTİ-SPAM VƏ FLOOD
 async def anti_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,7 +274,6 @@ async def anti_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_mention = f"[{user.first_name}](tg://user?id={user.id})"
 
-    # Adminləri flood və ya spam qorumasından azad edirik
     try:
         member = await context.bot.get_chat_member(chat_id, user.id)
         if member.status in ['creator', 'administrator']:
@@ -299,10 +331,11 @@ def main():
     app.add_handler(CommandHandler("ban", manual_ban))
     app.add_handler(CommandHandler("unban", manual_unban))
     app.add_handler(CommandHandler("warn", manual_warn))
+    app.add_handler(CommandHandler("unwarn", manual_unwarn))
     
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), anti_spam))
     
-    print("Bot PRO v4.9 işə düşdü...")
+    print("Bot PRO v5.0 işə düşdü...")
     app.run_polling()
 
 if __name__ == '__main__':
