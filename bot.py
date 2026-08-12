@@ -1,24 +1,41 @@
 import logging
 import time
-from telegram import Update, ChatPermissions
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram import Update, ChatPermissions, ChatMemberUpdated
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, ChatMemberHandler, filters
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 SPAM_WORDS = ["t.me/", "http://", "https://", "mərc", "kazino", "bonus", "kripto", "qazananc", "investisiya"]
 
 warnings_db = {}
+group_settings = {}
+
+DEFAULT_WELCOME_TEXT = (
+    "🌍 **Xoş Gəlmisiniz, {user_mention}!** 🌍\n\n"
+    "✨ Qrupumuza qoşulduğunuz üçün şadıq!\n"
+    "Burada hörmət, səmimiyyət və xoş ünsiyyət əsasdır. 🤝\n\n"
+    "📌 Qrup qaydalarına riayət edin.\n"
+    "🚫 Spam, reklam və digər üzvləri narahat edən davranışlara yol verməyin.\n"
+    "💬 Söhbətlərdə aktiv olun və xoş vaxt keçirin! ❤️\n\n"
+    "Sizə xoş söhbətlər və gözəl vaxt arzulayırıq! 🫶\n\n"
+    "👑 **Kurucu:** @YerKuresinde\n"
+    "🛡️ **Nəzarət:** @sasaadminn"
+)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🛡 **Anti-Spam & Moderasiya Botuna Xoş Gəlmisiniz!**\n\n"
         "Mən qrupunuzu reklamçılardan, zərərli linklərdən, stiker/mesaj floodlarından və qayda pozanlardan qoruyuram.\n\n"
-        "⚙️ **Botun İmkanları:**\n"
-        "• Tag (@username) və ya Reply ilə idarəetmə\n"
-        "• Sonsuz və ya vaxtlı `/mute` / `/unmute`\n"
-        "• `/ban`, `/unban`, `/warn`, `/unwarn` sistemləri\n\n"
+        "⚙️ **İdarəetmə Komutları:**\n"
+        "• `/mute [@user] [vaxt]` (Məsələn: `/mute @salamqaqa 10m` və ya sadəcə `/mute` sonsuz)\n"
+        "• `/unmute [@user]`\n"
+        "• `/ban [@user]`\n"
+        "• `/unban [user_id]`\n"
+        "• `/warn [@user] [səbəb]`\n"
+        "• `/unwarn [@user]`\n"
+        "• `/welcome on / off` | `/setwelcome [mətn]`\n\n"
         "🛠 **Qurucu / Owner:** @sasaadminn\n"
-        "🚀 **Versiya:** PRO v5.3"
+        "🚀 **Versiya:** PRO v7.0"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -40,41 +57,109 @@ def parse_time(time_str):
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.message.from_user
     chat = update.effective_chat
-    
     member = await chat.get_member(user.id)
     if member.status in ['creator', 'administrator']:
         return True
-    
-    await update.message.reply_text("⚠️ Bu komutdan yalnız **qrup adminləri** istifadə edə bilər!", parse_mode="Markdown")
+    await update.message.reply_text("⚠️ **Diqqət:** Bu əmrdən yalnız qrup adminləri istifadə edə bilər!", parse_mode="Markdown")
     return False
 
-# İstifadəçini tapmaq üçün köməkçi funksiya (Reply, Text-mention və ya @username dəstəkli)
-async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Hədəfi tapmaq: Reply, Text-mention və ya birbaşa @username yazılışı dəstəkləyir
+async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     
     # 1. Reply edilibsə
     if message.reply_to_message:
         return message.reply_to_message.from_user, context.args
         
-    # 2. Tag edilibsə və ya argüman verilibsə
+    # 2. Tag və ya @username yazılibsə
     if context.args:
         first_arg = context.args[0]
-        # Əgər @ ilə başlayırsa
         if first_arg.startswith("@"):
-            username_to_find = first_arg[1:].lower()
-            
-            # Əgər text_mention varsa
+            username_target = first_arg[1:]
+            # Əgər mesajda entity (text_mention) varsa
             if message.entities:
                 for entity in message.entities:
                     if entity.type == "text_mention":
                         return entity.user, context.args[1:]
             
-            # Əgər cari mesajı yazan şəxsin özüdürsə və ya qrupdakı son aktivliklərdəndirsə
-            # Qeyd: Telegram botları birbaşa @username ilə idarə olunan user-in ID-sini bilmək üçün 
-            # ya həmin şəxs botla əlaqədə olmalıdır, ya da qrupda mesajı olmalıdır.
-            # Lakin ən rahat yol kimi əgər tapmasa reply etməyi tələb edəcəyik.
+            # Əgər sadəcə @ad yazılıbsa, hələlik sadəcə obyekt yarada bilmirik amma 
+            # qrup üzvü kimi qəbul edib adını göstərəcəyik. 
+            # (Qeyd: Telegram botları tam offline username-i ID-yə çevirə bilmədiyi üçün 
+            #  əgər istifadəçi həmin an tapılmırsa, ID əvəzinə username kimi işlədəcəyik)
+            class PseudoUser:
+                def __init__(self, uname):
+                    self.id = uname  # Username saxlayırıq
+                    self.first_name = f"@{uname}"
+                    self.is_pseudo = True
             
+            return PseudoUser(username_target), context.args[1:]
+
     return None, context.args
+
+# Xoş gəldin tənzimləmələri
+async def welcome_settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
+    chat_id = update.effective_chat.id
+    
+    if chat_id not in group_settings:
+        group_settings[chat_id] = {"welcome_status": True, "welcome_text": DEFAULT_WELCOME_TEXT}
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚙️ **Xoş Gəldin Sisteminin İdarə Edilməsi:**\n\n"
+            "• `/welcome on` — Aktivləşdirmək\n"
+            "• `/welcome off` — Bağlamaq\n"
+            "• `/setwelcome [mətn]` — Mesajı dəyişmək", 
+            parse_mode="Markdown"
+        )
+        return
+
+    arg = context.args[0].lower()
+    if arg == "on":
+        group_settings[chat_id]["welcome_status"] = True
+        await update.message.reply_text("✨ Xoş gəldin mesajı uğurla **aktivləşdirildi**.", parse_mode="Markdown")
+    elif arg == "off":
+        group_settings[chat_id]["welcome_status"] = False
+        await update.message.reply_text("❌ Xoş gəldin mesajı **söndürüldü**.", parse_mode="Markdown")
+
+async def set_welcome_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
+    chat_id = update.effective_chat.id
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ Zəhmət olmasa yeni mətni daxil edin.\n_Qeyd: Üzvün adını qoymaq üçün `{user_mention}` yazın._", parse_mode="Markdown")
+        return
+        
+    new_text = " ".join(context.args)
+    if chat_id not in group_settings:
+        group_settings[chat_id] = {"welcome_status": True, "welcome_text": DEFAULT_WELCOME_TEXT}
+        
+    group_settings[chat_id]["welcome_text"] = new_text
+    await update.message.reply_text("✅ Yeni xoş gəldin şablonu yadda saxlanıldı!", parse_mode="Markdown")
+
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = update.chat_member
+    if not result: return
+    
+    chat_id = result.chat.id
+    if chat_id not in group_settings:
+        group_settings[chat_id] = {"welcome_status": True, "welcome_text": DEFAULT_WELCOME_TEXT}
+        
+    if not group_settings[chat_id]["welcome_status"]: return
+
+    old_member = result.old_chat_member
+    new_member = result.new_chat_member
+    
+    if old_member.status in ["left", "banned"] and new_member.status == "member":
+        user = new_member.user
+        user_mention = f"[{user.first_name}](tg://user?id={user.id})"
+        template = group_settings[chat_id]["welcome_text"]
+        final_message = template.replace("{user_mention}", user_mention)
+        
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Xoş gəldin xətası: {e}")
 
 # MUTE KOMUTU
 async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -82,10 +167,13 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat_id = message.chat.id
 
-    target_user, remaining_args = await resolve_target(update, context)
-    
+    target_user, remaining_args = await resolve_target_user(update, context)
     if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa istifadəçinin **mesajına cavab verin (reply edin)**!\n_Məsələn: /mute və ya /mute 10m_", parse_mode="Markdown")
+        await message.reply_text("⚠️ Zəhmət olmasa istifadəçini **tag edin** (məsələn: `/mute @salamqaqa 10m`) və ya mesajına **reply** atın!", parse_mode="Markdown")
+        return
+
+    if getattr(target_user, 'is_pseudo', False):
+        await message.reply_text(f"⚠️ `{target_user.first_name}` qrupda heç mesaj yazmadığı üçün ID-si tapılmadı. Zəhmət olmasa həmin şəxsin mesajına **reply** ataraq mute edin.", parse_mode="Markdown")
         return
 
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
@@ -93,7 +181,7 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_member = await context.bot.get_chat_member(chat_id, target_user.id)
         if target_member.status in ['creator', 'administrator']:
-            await message.reply_text("❌ **Olmaz!** Admini və ya qrup sahibini mute edə bilməzsən!", parse_mode="Markdown")
+            await message.reply_text("❌ **Əmr yerinə yetirilmədi:** Admini və ya qrup sahibini mute edə bilməzsən!", parse_mode="Markdown")
             return
     except Exception:
         pass
@@ -101,7 +189,7 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_arg = remaining_args[0] if remaining_args else None
     duration = parse_time(time_arg) if time_arg else 0
     mute_until = int(time.time() + duration) if duration > 0 else 0
-    duration_text = time_arg if time_arg else "Sonsuz (Admin açana qədər)"
+    duration_text = time_arg if time_arg else "Sonsuz (Admin qaldırana qədər)"
 
     try:
         await context.bot.restrict_chat_member(
@@ -110,50 +198,52 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
             until_date=mute_until
         )
         success_msg = (
-            "╭━ 🔇 **İSTİFADƏÇİ MUTE EDİLDİ** 🔇 ━╮\n\n"
+            "╭━ 🔇 **İSTİFADƏÇİ SƏSSİZƏ ALINDI** 🔇 ━╮\n\n"
             f"👤 **İstifadəçi:** {target_mention}\n"
             f"⏱ **Müddət:** `{duration_text}`\n"
             "📜 **Status:** Mesaj yazmaq hüququ məhdudlaşdırıldı.\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         await message.reply_text(success_msg, parse_mode="Markdown")
     except Exception as e:
         await message.reply_text(f"❌ Xəta baş verdi: {e}")
 
-# UNMUTE KOMUTU
+# UNMUTE KOMUTU (Mutedə deyilsə xəbərdarlıq verir)
 async def manual_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context): return
     message = update.message
+    chat_id = message.chat.id
     
-    target_user, _ = await resolve_target(update, context)
-    if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa səssizliyini qaldırmaq istədiyiniz şəxsin **mesajına cavab verin**!", parse_mode="Markdown")
+    target_user, _ = await resolve_target_user(update, context)
+    if not target_user or getattr(target_user, 'is_pseudo', False):
+        await message.reply_text("⚠️ Zəhmət olmasa səssizliyini qaldırmaq istədiyiniz şəxsin **mesajına cavab verin** və ya tag edin!", parse_mode="Markdown")
         return
 
-    chat_id = message.chat.id
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, target_user.id)
+        if member.status == "member" and getattr(member, 'can_send_messages', True):
+            await message.reply_text(f"ℹ️ **Bildiriş:** {target_mention} onsuz da mute-də deyil!", parse_mode="Markdown")
+            return
+    except Exception:
+        pass
 
     try:
         await context.bot.restrict_chat_member(
             chat_id, target_user.id,
             permissions=ChatPermissions(
-                can_send_messages=True,
-                can_send_audios=True,
-                can_send_documents=True,
-                can_send_photos=True,
-                can_send_videos=True,
-                can_send_video_notes=True,
-                can_send_voice_notes=True,
-                can_send_polls=True,
-                can_send_other_messages=True,
+                can_send_messages=True, can_send_audios=True, can_send_documents=True,
+                can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
                 can_add_web_page_previews=True
             )
         )
         unmute_msg = (
-            "╭━ 🔊 **MUTE QALDIRILDI** 🔊 ━╮\n\n"
+            "╭━ 🔊 **SƏSSİZLİK QALDIRILDI** 🔊 ━╮\n\n"
             f"👤 **İstifadəçi:** {target_mention}\n"
             "📜 **Status:** Yenidən mesaj yazmaq hüququ verildi.\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         await message.reply_text(unmute_msg, parse_mode="Markdown")
     except Exception as e:
@@ -165,9 +255,9 @@ async def manual_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat_id = message.chat.id
     
-    target_user, _ = await resolve_target(update, context)
-    if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa banlamaq istədiyiniz şəxsin **mesajına cavab verin**!", parse_mode="Markdown")
+    target_user, _ = await resolve_target_user(update, context)
+    if not target_user or getattr(target_user, 'is_pseudo', False):
+        await message.reply_text("⚠️ Zəhmət olmasa banlamaq istədiyiniz şəxsin **mesajına cavab verin** və ya tag edin!", parse_mode="Markdown")
         return
 
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
@@ -175,7 +265,7 @@ async def manual_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_member = await context.bot.get_chat_member(chat_id, target_user.id)
         if target_member.status in ['creator', 'administrator']:
-            await message.reply_text("❌ **Olmaz!** Admini və ya qrup sahibini qrupdan ban edə bilməzsən!", parse_mode="Markdown")
+            await message.reply_text("❌ **Əmr yerinə yetirilmədi:** Admini və ya qrup sahibini ban edə bilməzsən!", parse_mode="Markdown")
             return
     except Exception:
         pass
@@ -186,13 +276,13 @@ async def manual_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "╭━ 🔨 **İSTİFADƏÇİ BAN OLUNDU** 🔨 ━╮\n\n"
             f"👤 **İstifadəçi:** {target_mention}\n"
             "🗑 **Status:** Qrupdan qovuldu və geri gələ bilməz!\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         await message.reply_text(ban_msg, parse_mode="Markdown")
     except Exception as e:
         await message.reply_text(f"❌ Xəta baş verdi: {e}")
 
-# UNBAN KOMUTU
+# UNBAN KOMUTU (Bandada deyilsə xəbərdarlıq verir)
 async def manual_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context): return
     message = update.message
@@ -204,13 +294,17 @@ async def manual_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = message.chat.id
     try:
         user_id = int(context.args[0])
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status != "kicked":
+            await message.reply_text(f"ℹ️ **Bildiriş:** Bu ID-yə sahib (`{user_id}`) istifadəçi onsuz da ban olunmayıb!", parse_mode="Markdown")
+            return
+
         await context.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
-        
         unban_msg = (
             "╭━ 🔓 **BAN QALDIRILDI** 🔓 ━╮\n\n"
             f"👤 **İstifadəçi ID:** `{user_id}`\n"
-            "📜 **Status:** Qrupdan ban qaldırıldı, yenidən qoşula bilər.\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+            "📜 **Status:** Ban qaldırıldı, yenidən qrupa qoşula bilər.\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         await message.reply_text(unban_msg, parse_mode="Markdown")
     except Exception as e:
@@ -222,9 +316,9 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat_id = message.chat.id
     
-    target_user, remaining_args = await resolve_target(update, context)
-    if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlıq vermək istədiyiniz şəxsin **mesajına cavab verin**!\n_Məsələn: /warn səbəb_", parse_mode="Markdown")
+    target_user, remaining_args = await resolve_target_user(update, context)
+    if not target_user or getattr(target_user, 'is_pseudo', False):
+        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlıq vermək istədiyiniz şəxsin **mesajına cavab verin** və ya tag edin!", parse_mode="Markdown")
         return
 
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
@@ -232,7 +326,7 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_member = await context.bot.get_chat_member(chat_id, target_user.id)
         if target_member.status in ['creator', 'administrator']:
-            await message.reply_text("❌ **Olmaz!** Adminə xəbərdarlıq vermək olmaz!", parse_mode="Markdown")
+            await message.reply_text("❌ **Əmr yerinə yetirilmədi:** Adminə xəbərdarlıq vermək olmaz!", parse_mode="Markdown")
             return
     except Exception:
         pass
@@ -254,7 +348,7 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "╭━ 🚨 **LİMİT AŞILDI (3/3 BAN)** 🚨 ━╮\n\n"
                 f"👤 **İstifadəçi:** {target_mention}\n"
                 "⚠️ 3 dəfə xəbərdarlıq aldığı üçün qrupdan **ban olundu**!\n\n"
-                "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+                "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
             )
             await message.reply_text(ban_msg, parse_mode="Markdown")
         except Exception as e:
@@ -265,7 +359,7 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 **İstifadəçi:** {target_mention}\n"
             f"📊 **Xəbərdarlıq sayı:** `{current_warns} / 3`\n"
             f"📜 **Səbəb:** `{reason}`\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         await message.reply_text(warn_msg, parse_mode="Markdown")
 
@@ -275,8 +369,8 @@ async def manual_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat_id = message.chat.id
     
-    target_user, _ = await resolve_target(update, context)
-    if not target_user:
+    target_user, _ = await resolve_target_user(update, context)
+    if not target_user or getattr(target_user, 'is_pseudo', False):
         await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlığını silmək istədiyiniz şəxsin **mesajına cavab verin**!", parse_mode="Markdown")
         return
 
@@ -290,11 +384,11 @@ async def manual_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "╭━ ✅ **XƏBƏRDARLIQ SİLİNDİ** ✅ ━╮\n\n"
             f"👤 **İstifadəçi:** {target_mention}\n"
             f"📊 **Qalan xəbərdarlıq:** `{current_warns} / 3`\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         await message.reply_text(unwarn_msg, parse_mode="Markdown")
     else:
-        await message.reply_text("ℹ️ Bu istifadəçinin aktiv xəbərdarlığı yoxdur.", parse_mode="Markdown")
+        await message.reply_text("ℹ️ **Bildiriş:** Bu istifadəçinin aktiv xəbərdarlığı yoxdur.", parse_mode="Markdown")
 
 # ANTİ-SPAM VƏ FLOOD
 async def anti_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -332,7 +426,7 @@ async def anti_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 **İstifadəçi:** {user_mention}\n"
                 "⏱ **Məhdudiyyət:** `1 Dəqiqəlik Mute`\n"
                 "📜 **Səbəb:** Çox sürətli mesaj göndərmək.\n\n"
-                "╰━━━━━━━━━━━━━━━━━━╯"
+                "╰━━━━━━━━━━━━━━━━━━━━━━╯"
             )
             await message.reply_text(mute_msg, parse_mode="Markdown")
         except Exception as e: 
@@ -346,7 +440,7 @@ async def anti_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "╭━ ⚠️ **REKLAM / SPAM AŞKARLANDI!** ⚠️ ━╮\n\n"
                 f"👤 **İstifadəçi:** {user_mention}\n"
                 "🗑 **Status:** Mesajınız silindi!\n"
-                "╰━━━━━━━━━━━━━━━━━━━━━━━╯"
+                "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
             )
             await context.bot.send_message(chat_id=chat_id, text=spam_msg, parse_mode="Markdown")
         except Exception as e:
@@ -363,10 +457,13 @@ def main():
     app.add_handler(CommandHandler("unban", manual_unban))
     app.add_handler(CommandHandler("warn", manual_warn))
     app.add_handler(CommandHandler("unwarn", manual_unwarn))
+    app.add_handler(CommandHandler("welcome", welcome_settings_cmd))
+    app.add_handler(CommandHandler("setwelcome", set_welcome_text))
     
+    app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), anti_spam))
     
-    print("Bot PRO v5.3 işə düşdü...")
+    print("Bot PRO v7.0 işə düşdü...")
     app.run_polling()
 
 if __name__ == '__main__':
