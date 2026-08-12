@@ -18,10 +18,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Qadağan olunmuş sözlərin bloklanması\n"
         "• Sürətli mesajlara avtomatik Mute\n"
         "• `/warn` (3 xəbərdarlıqda avto-ban)\n"
-        "• `/mute` və `/unmute` komutları\n"
-        "• `/ban` və `/unban` komutları\n\n"
+        "• `/mute`, `/unmute`, `/ban`, `/unban` komutları\n\n"
         "🛠 **Qurucu / Owner:** @sasaadminn\n"
-        "🚀 **Versiya:** PRO v4.8"
+        "🚀 **Versiya:** PRO v4.9"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -40,9 +39,24 @@ def parse_time(time_str):
     elif unit == 'd': return value * 86400
     return 60
 
+# Admin yoxlama funksiyası
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.message.from_user
+    chat = update.effective_chat
+    
+    # Qrup sahibidirsə həmişə icazəlidir
+    member = await chat.get_member(user.id)
+    if member.status in ['creator', 'administrator']:
+        return True
+    
+    await update.message.reply_text("⚠️ Bu komutdan yalnız **qrup adminləri** istifadə edə bilər!", parse_mode="Markdown")
+    return False
+
 # MUTE KOMUTU
 async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
     message = update.message
+    
     if not message.reply_to_message:
         await message.reply_text("⚠️ Zəhmət olmasa səssizləşdirmək istədiyiniz şəxsin **mesajına cavab verərək** bu komutu işlədin!\n_Məsələn: /mute 10m_", parse_mode="Markdown")
         return
@@ -51,6 +65,14 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_user = message.reply_to_message.from_user
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
     
+    try:
+        target_member = await context.bot.get_chat_member(chat_id, target_user.id)
+        if target_member.status in ['creator', 'administrator']:
+            await message.reply_text("❌ **Olmaz!** Admini və ya qrup sahibini mute edə bilməzsən!", parse_mode="Markdown")
+            return
+    except Exception:
+        pass
+
     time_arg = context.args[0] if context.args else "1m"
     duration = parse_time(time_arg)
     mute_until = int(time.time() + duration)
@@ -70,11 +92,13 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await message.reply_text(success_msg, parse_mode="Markdown")
     except Exception as e:
-        await message.reply_text(f"❌ Xəta baş verdi: {e}")
+        await message.reply_text(f"❌ Xəta baş verdi (Botun admin hüququ çatışmaya bilər): {e}")
 
 # UNMUTE KOMUTU
 async def manual_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
     message = update.message
+    
     if not message.reply_to_message:
         await message.reply_text("⚠️ Zəhmət olmasa səssizliyini qaldırmaq istədiyiniz şəxsin **mesajına cavab verərək** `/unmute` yazın!", parse_mode="Markdown")
         return
@@ -105,7 +129,9 @@ async def manual_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # BAN KOMUTU
 async def manual_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
     message = update.message
+    
     if not message.reply_to_message:
         await message.reply_text("⚠️ Zəhmət olmasa banlamaq istədiyiniz şəxsin **mesajına cavab verərək** `/ban` yazın!", parse_mode="Markdown")
         return
@@ -113,6 +139,14 @@ async def manual_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = message.chat.id
     target_user = message.reply_to_message.from_user
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
+
+    try:
+        target_member = await context.bot.get_chat_member(chat_id, target_user.id)
+        if target_member.status in ['creator', 'administrator']:
+            await message.reply_text("❌ **Olmaz!** Admini və ya qrup sahibini qrupdan ban edə bilməzsən!", parse_mode="Markdown")
+            return
+    except Exception:
+        pass
 
     try:
         await context.bot.ban_chat_member(chat_id, target_user.id)
@@ -126,9 +160,11 @@ async def manual_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await message.reply_text(f"❌ Xəta baş verdi: {e}")
 
-# UNBAN KOMUTU (/unban <user_id>)
+# UNBAN KOMUTU
 async def manual_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
     message = update.message
+    
     if not context.args:
         await message.reply_text("⚠️ Zəhmət olmasa istifadəçinin **ID nömrəsini** qeyd edin!\n_Məsələn: /unban 123456789_", parse_mode="Markdown")
         return
@@ -148,9 +184,11 @@ async def manual_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await message.reply_text(f"❌ Xəta baş verdi (ID-ni düzgün yazdığınızdan əmin olun): {e}")
 
-# WARN (XƏBƏRDARLIQ) KOMUTU
+# WARN KOMUTU
 async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
     message = update.message
+    
     if not message.reply_to_message:
         await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlıq vermək istədiyiniz şəxsin **mesajına cavab verərək** `/warn` yazın!", parse_mode="Markdown")
         return
@@ -159,6 +197,14 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_user = message.reply_to_message.from_user
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
     
+    try:
+        target_member = await context.bot.get_chat_member(chat_id, target_user.id)
+        if target_member.status in ['creator', 'administrator']:
+            await message.reply_text("❌ **Olmaz!** Adminə xəbərdarlıq vermək olmaz!", parse_mode="Markdown")
+            return
+    except Exception:
+        pass
+
     user_key = f"{chat_id}_{target_user.id}"
     warnings_db[user_key] = warnings_db.get(user_key, 0) + 1
     current_warns = warnings_db[user_key]
@@ -195,6 +241,14 @@ async def anti_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_mention = f"[{user.first_name}](tg://user?id={user.id})"
 
+    # Adminləri flood və ya spam qorumasından azad edirik
+    try:
+        member = await context.bot.get_chat_member(chat_id, user.id)
+        if member.status in ['creator', 'administrator']:
+            return
+    except Exception:
+        pass
+
     now = time.time()
     if 'last_msgs' not in context.user_data: context.user_data['last_msgs'] = []
     
@@ -227,7 +281,7 @@ async def anti_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.delete()
             spam_msg = (
                 "╭━ ⚠️ **REKLAM / SPAM AŞKARLANDI!** ⚠️ ━╮\n\n"
-                f"👤 **İstifadəçi:** {target_mention if 'target_mention' in locals() else 'İstifadəçi'}\n"
+                f"👤 **İstifadəçi:** {user_mention}\n"
                 "🗑 **Status:** Mesajınız silindi!\n"
                 "╰━━━━━━━━━━━━━━━━━━━━━━━╯"
             )
@@ -239,7 +293,6 @@ def main():
     TOKEN = "8687802391:AAG9xMvo5RlnCWrRfSpogDpVYCeeJf0G5LI"
     app = ApplicationBuilder().token(TOKEN).build()
     
-    # Bütün komandalar
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("mute", manual_mute))
     app.add_handler(CommandHandler("unmute", manual_unmute))
@@ -249,7 +302,7 @@ def main():
     
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), anti_spam))
     
-    print("Bot PRO v4.8 işə düşdü...")
+    print("Bot PRO v4.9 işə düşdü...")
     app.run_polling()
 
 if __name__ == '__main__':
