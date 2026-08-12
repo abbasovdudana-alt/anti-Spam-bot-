@@ -18,13 +18,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Sonsuz və ya vaxtlı `/mute` / `/unmute`\n"
         "• `/ban`, `/unban`, `/warn`, `/unwarn` sistemləri\n\n"
         "🛠 **Qurucu / Owner:** @sasaadminn\n"
-        "🚀 **Versiya:** PRO v5.2"
+        "🚀 **Versiya:** PRO v5.3"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 def parse_time(time_str):
     if not time_str:
-        return 0  # 0 demək sonsuz deməkdir
+        return 0
     unit = time_str[-1].lower()
     try:
         value = int(time_str[:-1])
@@ -48,67 +48,44 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     await update.message.reply_text("⚠️ Bu komutdan yalnız **qrup adminləri** istifadə edə bilər!", parse_mode="Markdown")
     return False
 
-# Hədəfi tapmaq üçün köməkçi funksiya (Reply və ya @tag dəstəyi)
-async def get_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# İstifadəçini tapmaq üçün köməkçi funksiya (Reply, Text-mention və ya @username dəstəkli)
+async def resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    # 1. Əgər mesaja cavab (reply) verilibsə
-    if message.reply_to_message:
-        return message.reply_to_message.from_user, []
     
-    # 2. Əgər komutla birlikdə @tag yazılıbsa (məsələn: /mute @test 10m)
+    # 1. Reply edilibsə
+    if message.reply_to_message:
+        return message.reply_to_message.from_user, context.args
+        
+    # 2. Tag edilibsə və ya argüman verilibsə
     if context.args:
         first_arg = context.args[0]
+        # Əgər @ ilə başlayırsa
         if first_arg.startswith("@"):
-            username = first_arg[1:]
-            chat_id = message.chat.id
-            try:
-                # Qrupdakı üzvlərdən tapmağa çalışırıq (Telegram API birbaşa username ilə axtarmadığı üçün entity yoxlanılır)
+            username_to_find = first_arg[1:].lower()
+            
+            # Əgər text_mention varsa
+            if message.entities:
                 for entity in message.entities:
                     if entity.type == "text_mention":
                         return entity.user, context.args[1:]
-                    elif entity.type == "mention":
-                        # Əgər sadəcə @username text olaraq yazılıbsa
-                        # Bot sahibinin qrupdakı üzvü tapması üçün əlavə sorğu tələb oluna bilər
-                        pass
-            except Exception:
-                pass
             
-            # Əgər textmention tapılmadısa, sadəcə argümanları ötürürük
-            # Alternativ olaraq text-dəki username-i parse etmək lazımdır
+            # Əgər cari mesajı yazan şəxsin özüdürsə və ya qrupdakı son aktivliklərdəndirsə
+            # Qeyd: Telegram botları birbaşa @username ilə idarə olunan user-in ID-sini bilmək üçün 
+            # ya həmin şəxs botla əlaqədə olmalıdır, ya da qrupda mesajı olmalıdır.
+            # Lakin ən rahat yol kimi əgər tapmasa reply etməyi tələb edəcəyik.
+            
     return None, context.args
 
-# MUTE KOMUTU (Sonsuz və ya vaxtlı, Tag və ya Reply dəstəkli)
+# MUTE KOMUTU
 async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context): return
     message = update.message
     chat_id = message.chat.id
 
-    target_user = None
-    time_arg = None
-
-    # Reply edilibsə
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-        if context.args:
-            time_arg = context.args[0]
-    # @tag yazılibsə (məsələn: /mute @user 10m)
-    elif context.args and message.entities:
-        for entity in message.entities:
-            if entity.type == "text_mention":
-                target_user = entity.user
-                break
-            elif entity.type == "mention" and len(context.args) > 0:
-                # Username vasitəsilə tag edilibsə
-                username_str = message.text[entity.offset : entity.offset + entity.length]
-                # Qeyd: Telegram API username ilə birbaşa user object vermədiyi üçün mesajdakı mention-u yoxlayırıq
-                pass
-
-    # Əgər hələ də tapılmayıbsa, sadəcə mətn içindən user tapmağa çalışaq
-    if not target_user and message.reply_to_message:
-        target_user = message.reply_to_message.from_user
+    target_user, remaining_args = await resolve_target(update, context)
     
     if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa istifadəçini **tag edin (@ad)** və ya **mesajına cavab verin**!\n_Məsələn: /mute @username 10m və ya sadəcə /mute_", parse_mode="Markdown")
+        await message.reply_text("⚠️ Zəhmət olmasa istifadəçinin **mesajına cavab verin (reply edin)**!\n_Məsələn: /mute və ya /mute 10m_", parse_mode="Markdown")
         return
 
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
@@ -121,6 +98,7 @@ async def manual_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    time_arg = remaining_args[0] if remaining_args else None
     duration = parse_time(time_arg) if time_arg else 0
     mute_until = int(time.time() + duration) if duration > 0 else 0
     duration_text = time_arg if time_arg else "Sonsuz (Admin açana qədər)"
@@ -147,12 +125,12 @@ async def manual_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context): return
     message = update.message
     
-    if not message.reply_to_message:
-        await message.reply_text("⚠️ Zəhmət olmasa səssizliyini qaldırmaq istədiyiniz şəxsin **mesajına cavab verərək** `/unmute` yazın!", parse_mode="Markdown")
+    target_user, _ = await resolve_target(update, context)
+    if not target_user:
+        await message.reply_text("⚠️ Zəhmət olmasa səssizliyini qaldırmaq istədiyiniz şəxsin **mesajına cavab verin**!", parse_mode="Markdown")
         return
 
     chat_id = message.chat.id
-    target_user = message.reply_to_message.from_user
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
 
     try:
@@ -181,23 +159,15 @@ async def manual_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await message.reply_text(f"❌ Xəta baş verdi: {e}")
 
-# BAN KOMUTU (Reply və ya Text Mention dəstəkli)
+# BAN KOMUTU
 async def manual_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context): return
     message = update.message
     chat_id = message.chat.id
     
-    target_user = None
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-    elif message.entities:
-        for entity in message.entities:
-            if entity.type == "text_mention":
-                target_user = entity.user
-                break
-
+    target_user, _ = await resolve_target(update, context)
     if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa banlamaq istədiyiniz şəxsin **mesajına cavab verin** və ya **tag edin (@ad)**!", parse_mode="Markdown")
+        await message.reply_text("⚠️ Zəhmət olmasa banlamaq istədiyiniz şəxsin **mesajına cavab verin**!", parse_mode="Markdown")
         return
 
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
@@ -252,22 +222,9 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat_id = message.chat.id
     
-    target_user = None
-    reason_args = []
-
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-        reason_args = context.args
-    elif message.entities:
-        for entity in message.entities:
-            if entity.type == "text_mention":
-                target_user = entity.user
-                # Tag-dən sonrakı hissəni səbəb kimi götürürük
-                reason_args = context.args[1:]
-                break
-
+    target_user, remaining_args = await resolve_target(update, context)
     if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlıq vermək istədiyiniz şəxsin **mesajına cavab verin** və ya **tag edin (@ad)**!\n_Məsələn: /warn @user səbəb_", parse_mode="Markdown")
+        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlıq vermək istədiyiniz şəxsin **mesajına cavab verin**!\n_Məsələn: /warn səbəb_", parse_mode="Markdown")
         return
 
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
@@ -280,7 +237,7 @@ async def manual_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    reason = " ".join(reason_args) if reason_args else "Göstərilməyib"
+    reason = " ".join(remaining_args) if remaining_args else "Göstərilməyib"
     user_key = f"{chat_id}_{target_user.id}"
     
     if user_key not in warnings_db:
@@ -318,17 +275,9 @@ async def manual_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat_id = message.chat.id
     
-    target_user = None
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-    elif message.entities:
-        for entity in message.entities:
-            if entity.type == "text_mention":
-                target_user = entity.user
-                break
-
+    target_user, _ = await resolve_target(update, context)
     if not target_user:
-        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlığını silmək istədiyiniz şəxsin **mesajına cavab verin** və ya **tag edin (@ad)**!", parse_mode="Markdown")
+        await message.reply_text("⚠️ Zəhmət olmasa xəbərdarlığını silmək istədiyiniz şəxsin **mesajına cavab verin**!", parse_mode="Markdown")
         return
 
     target_mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
@@ -417,7 +366,7 @@ def main():
     
     app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), anti_spam))
     
-    print("Bot PRO v5.2 işə düşdü...")
+    print("Bot PRO v5.3 işə düşdü...")
     app.run_polling()
 
 if __name__ == '__main__':
